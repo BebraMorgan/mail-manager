@@ -6,6 +6,7 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/emersion/go-message/mail"
+	"golang.org/x/net/html"
 
 	_ "github.com/emersion/go-message/charset"
 )
@@ -64,14 +65,13 @@ func ParseBody(r io.Reader) (string, error) {
 					continue
 				}
 
-				doc.Find(
-					"script, style, noscript",
-				).Remove()
+				doc.Find("script, style, noscript, blockquote, .gmail_quote, .yahoo_quoted, .moz-cite-prefix").Remove()
 
-				htmlText = doc.Find("body").Text()
-				if htmlText == "" {
-					htmlText = doc.Text()
+				var b strings.Builder
+				for _, node := range doc.Nodes {
+					htmlTextNode(node, &b)
 				}
+				htmlText = NormalizeBody(b.String())
 			}
 		}
 	}
@@ -81,4 +81,26 @@ func ParseBody(r io.Reader) (string, error) {
 	}
 
 	return strings.TrimSpace(htmlText), nil
+}
+
+func htmlTextNode(n *html.Node, b *strings.Builder) {
+	if n.Type == html.ElementNode {
+		switch n.Data {
+		case "script", "style", "noscript", "head":
+			return
+		}
+	}
+	if n.Type == html.TextNode {
+		b.WriteString(n.Data)
+		b.WriteByte(' ')
+	}
+	for child := n.FirstChild; child != nil; child = child.NextSibling {
+		htmlTextNode(child, b)
+	}
+	if n.Type == html.ElementNode {
+		switch n.Data {
+		case "p", "div", "br", "li", "tr", "h1", "h2", "h3", "section":
+			b.WriteByte('\n')
+		}
+	}
 }

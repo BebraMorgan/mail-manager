@@ -3,6 +3,8 @@ package config
 import (
 	"errors"
 	"fmt"
+	"math"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -17,6 +19,13 @@ type Config struct {
 	Mail       MailConfig
 	LLM        LLMConfig
 	Classifier ClassifierConfig
+	Auth       AuthConfig
+}
+
+type AuthConfig struct {
+	JWTSecret string
+	JWTIssuer string
+	TokenTTL  time.Duration
 }
 
 type AppConfig struct {
@@ -41,6 +50,8 @@ type MailConfig struct {
 	PollInterval    time.Duration
 	FetchLimit      int
 	MaxMessageBytes int
+	TrashFolder     string
+	AllowDelete     bool
 }
 
 type LLMConfig struct {
@@ -65,6 +76,7 @@ func Load() (*Config, error) {
 	}
 
 	cfg := &Config{
+		Auth: AuthConfig{JWTSecret: get("JWT_SECRET", ""), JWTIssuer: get("JWT_ISSUER", "mail-manager")},
 		App: AppConfig{
 			Env:  get("APP_ENV", "development"),
 			Host: get("APP_HOST", "127.0.0.1"),
@@ -80,6 +92,7 @@ func Load() (*Config, error) {
 			OAuthToken:  get("MAIL_OAUTH_TOKEN", ""),
 			AppPassword: get("MAIL_APP_PASSWORD", ""),
 			Folder:      get("MAIL_FOLDER", "INBOX"),
+			TrashFolder: get("MAIL_TRASH_FOLDER", ""),
 		},
 		LLM: LLMConfig{
 			BaseURL: get("LLM_BASE_URL", "http://127.0.0.1:8080/v1"),
@@ -88,6 +101,9 @@ func Load() (*Config, error) {
 		},
 	}
 
+	if cfg.Auth.TokenTTL, err = durationEnv("JWT_TOKEN_TTL", "12h"); err != nil {
+		return nil, err
+	}
 	if cfg.App.Port, err = intEnv("APP_PORT", 3000); err != nil {
 		return nil, err
 	}
@@ -103,6 +119,9 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	if cfg.Mail.AllowDelete, err = boolEnv("MAIL_ALLOW_DELETE", false); err != nil {
+		return nil, err
+	}
 	if cfg.Mail.MaxMessageBytes, err = intEnv(
 		"MAIL_MAX_MESSAGE_BYTES", 1048576,
 	); err != nil {
@@ -137,6 +156,15 @@ func Load() (*Config, error) {
 }
 
 func (c *Config) Validate() error {
+	if len(c.Auth.JWTSecret) < 32 {
+		return fmt.Errorf("JWT_SECRET must contain at least 32 bytes")
+	}
+	if c.Auth.JWTIssuer == "" || c.Auth.TokenTTL < time.Minute || c.Auth.TokenTTL > 24*time.Hour {
+		return fmt.Errorf("invalid JWT configuration")
+	}
+	if ip := net.ParseIP(c.App.Host); ip == nil || !ip.IsLoopback() {
+		return fmt.Errorf("APP_HOST must be loopback; use HTTPS reverse proxy for remote access")
+	}
 	if c.App.Port < 1 || c.App.Port > 65535 {
 		return fmt.Errorf("invalid APP_PORT")
 	}
@@ -168,6 +196,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("MAIL_FETCH_LIMIT must be 1..500")
 	}
 
+	if c.Mail.AllowDelete && (c.Mail.TrashFolder == "" || strings.EqualFold(c.Mail.TrashFolder, c.Mail.Folder)) {
+		return fmt.Errorf("MAIL_TRASH_FOLDER must be explicitly configured and different from MAIL_FOLDER")
+	}
 	if c.Mail.MaxMessageBytes < 1024 {
 		return fmt.Errorf("MAIL_MAX_MESSAGE_BYTES must be >= 1024")
 	}
@@ -180,7 +211,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("LLM_TIMEOUT must be positive")
 	}
 
-	if c.LLM.Temperature < 0 || c.LLM.Temperature > 2 {
+	if math.IsNaN(c.LLM.Temperature) || math.IsInf(c.LLM.Temperature, 0) || c.LLM.Temperature < 0 || c.LLM.Temperature > 2 {
 		return fmt.Errorf("invalid LLM_TEMPERATURE")
 	}
 

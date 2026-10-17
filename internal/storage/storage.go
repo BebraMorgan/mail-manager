@@ -3,6 +3,7 @@ package storage
 import (
 	"context"
 	"database/sql"
+	"embed"
 	"fmt"
 	"net/url"
 	"os"
@@ -10,6 +11,9 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+//go:embed migrations/*.sql
+var migrationFiles embed.FS
 
 type Storage struct {
 	DB *sql.DB
@@ -27,6 +31,16 @@ func Open(ctx context.Context, path string) (*Storage, error) {
 		return nil, fmt.Errorf("create database directory: %w", err)
 	}
 
+	f, err := os.OpenFile(absPath, os.O_RDWR|os.O_CREATE, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("create private database: %w", err)
+	}
+	if err = f.Close(); err != nil {
+		return nil, err
+	}
+	if err = os.Chmod(absPath, 0600); err != nil {
+		return nil, fmt.Errorf("protect database: %w", err)
+	}
 	u := url.URL{
 		Scheme: "file",
 		Path:   absPath,
@@ -64,7 +78,7 @@ func (s *Storage) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	if version > 2 {
+	if version > 4 {
 		return fmt.Errorf(
 			"unsupported schema version: %d",
 			version,
@@ -74,10 +88,12 @@ func (s *Storage) Migrate(ctx context.Context) error {
 	files := []string{
 		"migrations/001_init.sql",
 		"migrations/002_queue.sql",
+		"migrations/003_auth_queue.sql",
+		"migrations/004_frontend_mail_ops.sql",
 	}
 
 	for i := version; i < len(files); i++ {
-		sqlBytes, err := os.ReadFile(files[i])
+		sqlBytes, err := migrationFiles.ReadFile(files[i])
 		if err != nil {
 			return err
 		}

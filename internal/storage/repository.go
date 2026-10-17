@@ -2,8 +2,6 @@ package storage
 
 import (
 	"context"
-	"database/sql"
-	"fmt"
 	"time"
 )
 
@@ -26,6 +24,14 @@ type Classification struct {
 	Category        string
 	Reason          string
 	Model           string
+	BodyTruncated   bool
+	OriginalChars   int
+	ProcessedChars  int
+	NeedsReview     bool
+	SpamVerdict     string
+	ActionRequired  bool
+	ActionType      string
+	Summary         string
 }
 
 type ReportItem struct {
@@ -35,129 +41,6 @@ type ReportItem struct {
 	Importance string `json:"importance"`
 	Category   string `json:"category"`
 	Reason     string `json:"reason"`
-}
-
-func (s *Storage) SaveEmail(
-	ctx context.Context,
-	email Email,
-) (int64, error) {
-	if email.Account == "" || email.Folder == "" ||
-		email.UID == 0 || email.UIDValidity == 0 {
-		return 0, fmt.Errorf("invalid IMAP email identity")
-	}
-
-	var receivedAt any
-	if !email.ReceivedAt.IsZero() {
-		receivedAt = email.ReceivedAt.UTC().Format(time.RFC3339Nano)
-	}
-
-	_, err := s.DB.ExecContext(ctx, `
-		INSERT INTO emails (
-			account, folder, uid_validity, uid,
-			sender, subject, received_at, created_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(account, folder, uid_validity, uid)
-		DO NOTHING
-	`,
-		email.Account,
-		email.Folder,
-		email.UIDValidity,
-		email.UID,
-		email.Sender,
-		email.Subject,
-		receivedAt,
-		time.Now().UTC().Format(time.RFC3339Nano),
-	)
-	if err != nil {
-		return 0, fmt.Errorf("save email: %w", err)
-	}
-
-	var id int64
-	err = s.DB.QueryRowContext(ctx, `
-		SELECT id FROM emails
-		WHERE account = ?
-		  AND folder = ?
-		  AND uid_validity = ?
-		  AND uid = ?
-	`,
-		email.Account,
-		email.Folder,
-		email.UIDValidity,
-		email.UID,
-	).Scan(&id)
-
-	return id, err
-}
-
-func (s *Storage) GetClassification(
-	ctx context.Context,
-	emailID int64,
-) (*Classification, error) {
-	var c Classification
-
-	err := s.DB.QueryRowContext(ctx, `
-		SELECT email_id, is_spam, importance,
-		       include_in_report, category, reason, model
-		FROM classifications
-		WHERE email_id = ?
-	`, emailID).Scan(
-		&c.EmailID,
-		&c.IsSpam,
-		&c.Importance,
-		&c.IncludeInReport,
-		&c.Category,
-		&c.Reason,
-		&c.Model,
-	)
-
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-
-	return &c, nil
-}
-
-func (s *Storage) SaveClassification(
-	ctx context.Context,
-	c Classification,
-) error {
-	switch c.Importance {
-	case "low", "medium", "high", "uncertain":
-	default:
-		return fmt.Errorf("invalid importance: %q", c.Importance)
-	}
-
-	_, err := s.DB.ExecContext(ctx, `
-		INSERT INTO classifications (
-			email_id, is_spam, importance,
-			include_in_report, category, reason,
-			model, classified_at
-		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(email_id) DO UPDATE SET
-			is_spam = excluded.is_spam,
-			importance = excluded.importance,
-			include_in_report = excluded.include_in_report,
-			category = excluded.category,
-			reason = excluded.reason,
-			model = excluded.model,
-			classified_at = excluded.classified_at
-	`,
-		c.EmailID,
-		c.IsSpam,
-		c.Importance,
-		c.IncludeInReport,
-		c.Category,
-		c.Reason,
-		c.Model,
-		time.Now().UTC().Format(time.RFC3339Nano),
-	)
-
-	return err
 }
 
 func (s *Storage) GetReportItems(
@@ -173,9 +56,10 @@ func (s *Storage) GetReportItems(
 			c.reason
 		FROM emails e
 		JOIN classifications c ON c.email_id = e.id
-		WHERE c.include_in_report = 1
+		WHERE c.include_in_report = 1 AND e.deletion_state = 'active'
 		ORDER BY e.received_at DESC, e.id DESC
-	`)
+        LIMIT 1000
+    `)
 	if err != nil {
 		return nil, err
 	}

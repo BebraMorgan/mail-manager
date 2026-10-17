@@ -6,9 +6,12 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"github.com/emersion/go-message/charset"
+	"mime"
 	"net"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -23,33 +26,42 @@ var (
 
 const imapBatchSize = 20
 
-// connect opens an encrypted IMAP connection.
-func (m *Client) connect() (*imapclient.Client, error) {
+// connect opens an encrypted IMAP connection with a bounded session lifetime.
+// Cancellation closes the underlying socket and unblocks pending IMAP commands.
+func (m *Client) connect(ctx context.Context) (*imapclient.Client, error) {
 	cfg := m.config
-
-	address := net.JoinHostPort(
-		cfg.Host,
-		strconv.Itoa(cfg.Port),
-	)
-
-	client, err := imapclient.DialTLS(
-		address,
-		&imapclient.Options{
-			TLSConfig: &tls.Config{
-				ServerName: cfg.Host,
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("IMAP connection: %w", err)
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
-
+	address := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 15 * time.Second}, "tcp", address, &tls.Config{
+		ServerName: cfg.Host, MinVersion: tls.VersionTLS12,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("IMAP TLS connection: %w", err)
+	}
+	// Each scan handles bounded batches. On a large mailbox, a session can
+	// expire and the next scan resumes from the committed UID cursor.
+	if err := conn.SetDeadline(time.Now().Add(3 * time.Minute)); err != nil {
+		conn.Close()
+		return nil, err
+	}
+	client := imapclient.New(conn, &imapclient.Options{WordDecoder: &mime.WordDecoder{CharsetReader: charset.Reader}})
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-client.Closed():
+		}
+	}()
+	if err := client.WaitGreeting(); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("IMAP greeting: %w", err)
+	}
 	if err := authenticate(client, cfg); err != nil {
 		client.Close()
-		return nil, fmt.Errorf("IMAP authentication: %w", err)
+		return nil, fmt.Errorf("IMAP auth: %w", err)
 	}
-
 	return client, nil
 }
 
@@ -65,7 +77,7 @@ func (m *Client) Scan(
 		return 0, err
 	}
 
-	client, err := m.connect()
+	client, err := m.connect(ctx)
 	if err != nil {
 		return 0, err
 	}
@@ -133,12 +145,16 @@ func (m *Client) Scan(
 
 	registered := 0
 
-	for start := 0; start < len(filtered); start += imapBatchSize {
+	batchSize := imapBatchSize
+	if cfg.FetchLimit > 0 && cfg.FetchLimit < batchSize {
+		batchSize = cfg.FetchLimit
+	}
+	for start := 0; start < len(filtered); start += batchSize {
 		if err := ctx.Err(); err != nil {
 			return registered, err
 		}
 
-		end := start + imapBatchSize
+		end := start + batchSize
 		if end > len(filtered) {
 			end = len(filtered)
 		}
@@ -186,6 +202,16 @@ func (m *Client) Scan(
 			// A message can disappear between SEARCH
 			// and FETCH if it was deleted elsewhere.
 			if !ok {
+				// Search the exact UID again: only a confirmed expunge can be skipped.
+				var exact imap.UIDSet
+				exact.AddNum(uid)
+				verify, verifyErr := client.UIDSearch(&imap.SearchCriteria{UID: []imap.UIDSet{exact}}, nil).Wait()
+				if verifyErr != nil {
+					return registered, fmt.Errorf("verify missing UID %d: %w", uid, verifyErr)
+				}
+				if len(verify.AllUIDs()) > 0 {
+					return registered, fmt.Errorf("UID %d is still present but FETCH omitted it", uid)
+				}
 				continue
 			}
 
@@ -248,7 +274,7 @@ func (m *Client) FetchOne(
 		return "", err
 	}
 
-	client, err := m.connect()
+	client, err := m.connect(ctx)
 	if err != nil {
 		return "", err
 	}
