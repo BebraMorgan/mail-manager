@@ -78,7 +78,7 @@ func (s *Storage) Migrate(ctx context.Context) error {
 		return err
 	}
 
-	if version > 4 {
+	if version != 0 && version != 1 {
 		return fmt.Errorf(
 			"unsupported schema version: %d",
 			version,
@@ -86,10 +86,7 @@ func (s *Storage) Migrate(ctx context.Context) error {
 	}
 
 	files := []string{
-		"migrations/001_init.sql",
-		"migrations/002_queue.sql",
-		"migrations/003_auth_queue.sql",
-		"migrations/004_frontend_mail_ops.sql",
+		"migrations/001_schema.sql",
 	}
 
 	for i := version; i < len(files); i++ {

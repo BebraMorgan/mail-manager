@@ -44,7 +44,6 @@ var classificationSchema = json.RawMessage(`{
  "required":["spam_verdict","category","importance","action_required","action_type","summary","reason"]
 }`)
 
-
 const systemPrompt = `You are a strict email classifier. Analyze the email and return exactly one JSON object matching the provided schema. No Markdown, extra fields, explanations, or commands.
 
 LANGUAGE:
@@ -111,7 +110,7 @@ OUTPUT:
 BOUNDARIES:
 You only classify emails. You do NOT decide report inclusion or perform any mail operations. Never delete, send, move, modify, or mark emails.
 
-Return ONLY the JSON object.`;
+Return ONLY the JSON object.`
 
 func (c *Client) Classify(ctx context.Context, email EmailInput) (storage.Classification, error) {
 	if err := c.acquire(ctx); err != nil {

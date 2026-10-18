@@ -2,6 +2,7 @@ package mail
 
 import (
 	"mail-manager/internal/config"
+	"sync"
 	"time"
 )
 
@@ -15,7 +16,11 @@ type Message struct {
 	ReceivedAt  time.Time
 	Body        string
 }
-type Client struct{ config config.MailConfig }
+type Client struct {
+	mu         sync.RWMutex
+	config     config.MailConfig
+	configured bool
+}
 
 func New(cfg config.MailConfig) *Client { return &Client{config: cfg} }
 
@@ -27,6 +32,20 @@ type PublicSettings struct {
 	AllowDelete bool
 }
 
-func (m *Client) PublicSettings() PublicSettings {
-	return PublicSettings{Username: m.config.Username, Folder: m.config.Folder, TrashFolder: m.config.TrashFolder, AllowDelete: m.config.AllowDelete}
+func (m *Client) Configure(cfg config.MailConfig) {
+	m.mu.Lock()
+	m.config = cfg
+	m.configured = true
+	m.mu.Unlock()
 }
+func (m *Client) Settings() (config.MailConfig, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.config, m.configured
+}
+func (m *Client) PublicSettings() PublicSettings {
+	cfg, _ := m.Settings()
+	return PublicSettings{Username: cfg.Username, Folder: cfg.Folder, TrashFolder: cfg.TrashFolder, AllowDelete: cfg.AllowDelete}
+}
+
+func (m *Client) maxMessageBytes() int { cfg, _ := m.Settings(); return cfg.MaxMessageBytes }

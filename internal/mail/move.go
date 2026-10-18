@@ -15,10 +15,11 @@ var ErrUIDValidityChanged = errors.New("mailbox UIDVALIDITY changed; resync befo
 // MoveToTrash is invoked ONLY by an authorized human API handler, never by worker/LLM.
 // It deliberately refuses the library's COPY/STORE/EXPUNGE fallback.
 func (m *Client) MoveToTrash(ctx context.Context, e storage.Email) error {
-	if m.config.TrashFolder == "" || m.config.TrashFolder == m.config.Folder {
+	cfg, _ := m.Settings()
+	if cfg.TrashFolder == "" || cfg.TrashFolder == cfg.Folder {
 		return errors.New("trash folder not configured")
 	}
-	if e.Account != m.config.Username || e.Folder != m.config.Folder {
+	if e.Account != cfg.Username || e.Folder != cfg.Folder {
 		return errors.New("different mailbox")
 	}
 	ctx, cancel := context.WithTimeout(ctx, 40*time.Second)
@@ -56,7 +57,7 @@ func (m *Client) MoveToTrash(ctx context.Context, e storage.Email) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_, err = client.Move(set, m.config.TrashFolder).Wait()
+	_, err = client.Move(set, cfg.TrashFolder).Wait()
 	if err != nil {
 		return fmt.Errorf("IMAP MOVE: %w", err)
 	}

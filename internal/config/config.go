@@ -29,10 +29,11 @@ type AuthConfig struct {
 }
 
 type AppConfig struct {
-	Env  string
-	Host string
-	Port int
-	Mode string
+	Env          string
+	Host         string
+	Port         int
+	Mode         string
+	FrontendDist string
 }
 
 type DatabaseConfig struct {
@@ -78,22 +79,15 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Auth: AuthConfig{JWTSecret: get("JWT_SECRET", ""), JWTIssuer: get("JWT_ISSUER", "mail-manager")},
 		App: AppConfig{
-			Env:  get("APP_ENV", "development"),
-			Host: get("APP_HOST", "127.0.0.1"),
-			Mode: get("GIN_MODE", "debug"),
+			Env:          get("APP_ENV", "development"),
+			Host:         get("APP_HOST", "127.0.0.1"),
+			Mode:         get("GIN_MODE", "debug"),
+			FrontendDist: get("FRONTEND_DIST", ""),
 		},
 		Database: DatabaseConfig{
 			Path: get("DB_PATH", "./data/mail-manager.db"),
 		},
-		Mail: MailConfig{
-			Host:        get("MAIL_HOST", "imap.yandex.ru"),
-			Username:    get("MAIL_USERNAME", ""),
-			AuthMethod:  get("MAIL_AUTH_METHOD", "oauth2"),
-			OAuthToken:  get("MAIL_OAUTH_TOKEN", ""),
-			AppPassword: get("MAIL_APP_PASSWORD", ""),
-			Folder:      get("MAIL_FOLDER", "INBOX"),
-			TrashFolder: get("MAIL_TRASH_FOLDER", ""),
-		},
+		Mail: MailConfig{Host: "imap.yandex.ru", Port: 993, AuthMethod: "oauth2", Folder: "INBOX", PollInterval: 5 * time.Minute, FetchLimit: 30, MaxMessageBytes: 1048576},
 		LLM: LLMConfig{
 			BaseURL: get("LLM_BASE_URL", "http://127.0.0.1:8080/v1"),
 			Model:   get("LLM_MODEL", "qwen3-4b"),
@@ -101,32 +95,13 @@ func Load() (*Config, error) {
 		},
 	}
 
-	if cfg.Auth.TokenTTL, err = durationEnv("JWT_TOKEN_TTL", "12h"); err != nil {
+	if cfg.Auth.TokenTTL, err = durationEnv("JWT_TOKEN_TTL", "15m"); err != nil {
 		return nil, err
 	}
 	if cfg.App.Port, err = intEnv("APP_PORT", 3000); err != nil {
 		return nil, err
 	}
-	if cfg.Mail.Port, err = intEnv("MAIL_PORT", 993); err != nil {
-		return nil, err
-	}
-	if cfg.Mail.PollInterval, err = durationEnv("MAIL_POLL_INTERVAL", "5m"); err != nil {
-		return nil, err
-	}
-	if cfg.Mail.FetchLimit, err = intEnv(
-		"MAIL_FETCH_LIMIT", 30,
-	); err != nil {
-		return nil, err
-	}
 
-	if cfg.Mail.AllowDelete, err = boolEnv("MAIL_ALLOW_DELETE", false); err != nil {
-		return nil, err
-	}
-	if cfg.Mail.MaxMessageBytes, err = intEnv(
-		"MAIL_MAX_MESSAGE_BYTES", 1048576,
-	); err != nil {
-		return nil, err
-	}
 	if cfg.LLM.Timeout, err = durationEnv("LLM_TIMEOUT", "120s"); err != nil {
 		return nil, err
 	}
@@ -177,30 +152,6 @@ func (c *Config) Validate() error {
 
 	if c.Database.Path == "" {
 		return fmt.Errorf("DB_PATH is required")
-	}
-
-	if c.Mail.Port < 1 || c.Mail.Port > 65535 {
-		return fmt.Errorf("invalid MAIL_PORT")
-	}
-
-	if c.Mail.AuthMethod != "oauth2" &&
-		c.Mail.AuthMethod != "app_password" {
-		return fmt.Errorf("invalid MAIL_AUTH_METHOD")
-	}
-
-	if c.Mail.PollInterval <= 0 {
-		return fmt.Errorf("MAIL_POLL_INTERVAL must be positive")
-	}
-
-	if c.Mail.FetchLimit < 1 || c.Mail.FetchLimit > 500 {
-		return fmt.Errorf("MAIL_FETCH_LIMIT must be 1..500")
-	}
-
-	if c.Mail.AllowDelete && (c.Mail.TrashFolder == "" || strings.EqualFold(c.Mail.TrashFolder, c.Mail.Folder)) {
-		return fmt.Errorf("MAIL_TRASH_FOLDER must be explicitly configured and different from MAIL_FOLDER")
-	}
-	if c.Mail.MaxMessageBytes < 1024 {
-		return fmt.Errorf("MAIL_MAX_MESSAGE_BYTES must be >= 1024")
 	}
 
 	if c.LLM.BaseURL == "" || c.LLM.Model == "" {

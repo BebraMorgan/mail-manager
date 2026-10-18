@@ -1,60 +1,54 @@
-# Mail Manager — local AI-powered email classification
+# Mail Manager backend
 
-Go + Gin + SQLite + Yandex IMAP + local llama.cpp / Qwen. Classification is read-only; a separately authenticated human administrator may manually move selected messages to Trash. The LLM never gets mailbox credentials or mutation tools.
+Single-user development backend for Gin, SQLite, Yandex IMAP, Qwen3 via llama.cpp, and a React frontend.
 
-## Upgrade / first run
+## Clean installation
 
-Stop any running instance. Backup the existing SQLite database **before** applying migration v4:
+**Destructive database reset:** stop the server; back up the previous `data/` directory if needed and remove the old SQLite database including `-wal` and `-shm` sidecars. The only supported schema starts from an empty database (`internal/storage/migrations/001_schema.sql`). There is no migration compatibility with older versions.
 
-```sh
-sqlite3 data/mail-manager.db ".backup 'data/mail-manager.backup.db'"
+Copy `.env.example` to `.env`, generate two **different** random values using `openssl rand -hex 32`: one for `JWT_SECRET`, one for `MAIL_SETTINGS_KEY`. Keep them secret and do not commit `.env`. `MAIL_SETTINGS_KEY` encrypts stored IMAP credentials with AES-256-GCM; losing it makes existing encrypted settings unreadable.
+
+Run `go mod download`, `go test ./...`, `go vet ./...`, `go run ./cmd/admin -username admin` (enter admin password on stdin), then `go run ./cmd/server`. Go version is specified in go.mod. Only one administrator can be created (`id=1`); no role or user endpoints remain.
+
+The server runs on localhost:3000, Qwen at localhost:8080. Configure IMAP **only by POST /api/mail/settings** after login, never from `.env`. Until configured, IMAP background processing is idle. Credentials are never returned by GET and are encrypted in SQLite. All mail operations require the administrator's session; moving emails to trash additionally requires password re-entry.
+
+## JWT cookie authentication
+
+`mm_session`: HttpOnly JWT access cookie, 15 minutes by default. `mm_refresh`: rotating, one-use HttpOnly refresh cookie, 30 days. `mm_csrf`: double-submit CSRF cookie. `POST /api/auth/refresh` exchanges the refresh cookie for new cookies without exposing JWT to JavaScript; `POST /api/auth/logout` revokes it. Use same-origin deployment (Vite proxy in dev / HTTPS reverse proxy in production); send `X-CSRF-Token` for mutations. Do not store tokens in localStorage.
+
+See [API.md](API.md) for exact routes and JSON shapes. This archive deliberately excludes `.env`, `.git`, databases, and frontend changes.
+
+## Serve the React production build from Gin (one origin)
+
+The frontend and API can run on the same `http://127.0.0.1:3000` origin;
+JWT and CSRF cookies work without CORS or a Vite proxy. In a production
+installation, put an HTTPS reverse proxy in front of Gin and keep APP_HOST
+on loopback.
+
+Build React and copy the **contents** of its `dist/` directory into a public
+build directory owned by the Go deployment. From a Fish shell:
+
+```fish
+cd ~/Projects/mail-manager-react
+npm ci
+npm run build
+mkdir -p ~/mail-manager/web/dist
+cp -a dist/. ~/mail-manager/web/dist/
 ```
 
-Copy `.env.example` to `.env` only for a new setup. **On an existing installation keep your current `.env` and database**, then add the new settings. The backend stores embedded SQL migrations (v1–v4).
+Set `FRONTEND_DIST=./web/dist` in the backend `.env` (or use an absolute path),
+then run `go run ./cmd/server` or your compiled Go binary from the backend
+directory. If `FRONTEND_DIST` is omitted, Gin runs API-only. If configured but
+missing `index.html`, startup fails with a clear error.
 
-```sh
-cp .env.example .env
-chmod 600 .env
-openssl rand -hex 32 # assign result to JWT_SECRET
-```
+- `GET /`, `/login`, `/mail`, `/reports`, `/settings`, etc. serve the SPA.
+- `/assets/*` and public Vite files are served from the built directory.
+- Unknown `/api/*` paths return JSON 404, not React HTML.
+- Missing JS/CSS return 404, not React HTML.
+- React `index.html` uses `Cache-Control: no-store`; Vite hashed assets are cached immutably.
+- `FRONTEND_DIST` is resolved relative to the **server's working directory**;
+  use an absolute path if running via systemd without `WorkingDirectory`.
 
-Configure IMAP (OAuth `mail:imap_ro` for read-only), `LLM_BASE_URL`, `LLM_MODEL` and `JWT_SECRET`. For first administrator (if no users exist):
-
-```sh
-# In fish shell
-read -s -P 'New admin password: ' ADMIN_PASS
-printf '%s\n' "$ADMIN_PASS" | go run ./cmd/admin -username admin
-set -e ADMIN_PASS
-```
-
-Compile and run (Go version per go.mod):
-
-```sh
-go mod tidy
-go test ./...
-go vet ./...
-go run ./cmd/server
-```
-
-## Manual deletion — disabled by default
-
-1. Obtain Yandex OAuth scope `mail:imap_full` when you are ready for human-controlled deletion; `mail:imap_ro` cannot move messages.
-2. Call `GET /api/mail/folders` with admin JWT to learn the exact Trash folder name. Use the folder with the `\\Trash` attribute where possible.
-3. In `.env`, set `MAIL_TRASH_FOLDER=<exact name>` and `MAIL_ALLOW_DELETE=true`, then restart.
-4. The React frontend should call `/api/mail/delete/preview` to display the selected sender/subject, then require a second explicit confirmation before calling `POST /api/mail/delete` with `{ "ids": [1,2], "confirm": "MOVE_TO_TRASH", "password": "<admin password>" }`.
-
-The API checks roles, current UIDVALIDITY and configured account/folder; it does not offer an expunge or send operation. MOVE failures may be ambiguous; check `/api/queue/problems` and audit rather than automatically repeating deletion.
-
-**Never publish `.env`, database files, `.git` metadata with secret history, or OAuth tokens.** The distributed source archive intentionally excludes all of these.
-
-## Frontend API
-
-See [API.md](API.md). React can use Vite's `/api` proxy in development or a same-origin HTTPS proxy for deployment. All mail/report API calls use Bearer JWT; admin operations are role-restricted. The system keeps message bodies out of SQLite; React can request individual bodies via a read-only endpoint.
-
-## Testing and caveats
-
-Run `go test ./...`, `go vet ./...` and test a staged copy of your database. Integration with real Yandex IMAP and local Qwen remains necessary. Expect occasional duplicate *LLM requests* after a crash; the mailbox UID unique constraint prevents duplicate local email rows. Background sync depends on a valid OAuth token; refresh is not implemented.
-
-If a MOVE is inconclusive, the backend marks the message for manual reconciliation; see `API.md`. Human confirmation is password-protected and an audit record is retained.
-
-React TypeScript types are in `contracts/mail-manager.d.ts`.
+`dist/` contains public website files only. Never place `.env`, database files,
+OAuth tokens, private keys or other server secrets into it. Rebuild React and
+recopy dist when changing the UI; the Go server serves the updated files.

@@ -16,6 +16,7 @@ import (
 	"mail-manager/internal/api"
 	"mail-manager/internal/auth"
 	"mail-manager/internal/config"
+	"mail-manager/internal/frontend"
 	"mail-manager/internal/llm"
 	"mail-manager/internal/mail"
 	"mail-manager/internal/storage"
@@ -56,6 +57,11 @@ func run() error {
 	}
 	llmClient := llm.New(cfg.LLM, cfg.Classifier.MaxEmailChars)
 	imapClient := mail.New(cfg.Mail)
+	if saved, err := db.LoadMailSettings(ctx); err == nil {
+		imapClient.Configure(saved)
+	} else if !errors.Is(err, storage.ErrMailNotConfigured) {
+		return err
+	}
 	worker := mail.NewWorker(imapClient, db, llmClient)
 	scheduler := mail.NewScheduler(imapClient, db, worker)
 	gin.SetMode(cfg.App.Mode)
@@ -65,6 +71,12 @@ func run() error {
 		return err
 	}
 	api.Register(router, db, scheduler, api.NewAPIAuth(db, tokens))
+	if cfg.App.FrontendDist != "" {
+		if err := frontend.Register(router, cfg.App.FrontendDist); err != nil {
+			return err
+		}
+		slog.Info("serving React frontend", "dist", cfg.App.FrontendDist)
+	}
 	server := &http.Server{
 		Addr: net.JoinHostPort(cfg.App.Host, strconv.Itoa(cfg.App.Port)), Handler: router,
 		ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 30 * time.Second, WriteTimeout: 5 * time.Minute,

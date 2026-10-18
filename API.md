@@ -1,71 +1,51 @@
-# Mail Manager API (v2 frontend contract)
+# Mail Manager API (development, single administrator)
 
-All `/api/*` endpoints except `/api/auth/login` require `Authorization: Bearer <JWT>`. The backend binds to `127.0.0.1` only; use a TLS reverse proxy/VPN for remote use. `admin` is required for modifying any stored classification or the mailbox.
+All endpoints use `http://127.0.0.1:3000` behind the Vite proxy or a same-origin HTTPS reverse proxy. No bearer tokens and no user-management API exist. The server supports exactly one administrator provisioned by `go run ./cmd/admin -username admin`, with an interactive password supplied on stdin.
 
-## Authentication and users
+## Authentication
 
-- `POST /api/auth/login` — `{"username":"admin","password":"..."}` → access_token, token_type.
-- `GET /api/auth/me` and `POST /api/auth/password` — authenticated.
-- `GET /api/users`, `POST /api/users`, `DELETE /api/users/:id` — admin.
+- `POST /api/auth/login` `{ "username": "admin", "password": "..." }` — sets `mm_session` (HttpOnly access JWT), `mm_refresh` (HttpOnly opaque refresh), `mm_csrf` (readable CSRF cookie); returns `{ "status": "ok" }`.
+- `GET /api/auth/me` — administrator public profile, access cookie required.
+- `POST /api/auth/refresh` — rotates refresh cookie and returns `{ "status": "ok" }`. No JSON refresh token. Requires `X-CSRF-Token: <mm_csrf cookie>`; must run without a valid access cookie after JWT expiry.
+- `POST /api/auth/logout` — revokes refresh session and clears cookies; requires CSRF header.
+- `POST /api/auth/password` `{ "current_password": "...", "new_password": "..." }` — invalidates JWT versions and all refresh sessions; requires valid access and CSRF header.
 
-## Classifications
+Cookie authentication requires a same-origin browser setup. Axios: `withCredentials: true`; on non-GET requests add the readable `mm_csrf` value to `X-CSRF-Token`. If a protected request returns 401, call `/api/auth/refresh` once (single-flight across concurrent requests), then retry the protected request; otherwise clear frontend session and show login. Do not send refresh tokens as JSON. The client must not store JWT in localStorage.
 
-- `GET /api/classification/schema` — stable taxonomy and permitted enum values.
-- `GET /api/classifications?limit=50&offset=0&category=work&importance=high&spam_verdict=not_spam&include_in_report=true&needs_review=false&q=subject` — paginated response `{items,total,count,limit,offset}`. Every filter is optional, maximum limit 200.
-- `GET /api/classifications/:id` — metadata and classification details.
-- `GET /api/mail/:id/content` — on-demand read-only IMAP fetch; JSON with sender, subject, body; never cached or persisted by backend.
-- `PATCH /api/classifications/:id` — **admin only**, human review, full object. Example:
+## Mail account via API, not environment
 
+- `GET /api/mail/settings` — returns nonsecret settings or `{ "configured": false }`.
+- `POST /api/mail/settings` — sets the active Yandex IMAP mailbox, stored encrypted in SQLite. POST JSON example:
 ```json
 {
-  "spam_verdict":"not_spam",
-  "category":"work",
-  "importance":"high",
-  "action_required":true,
-  "action_type":"reply",
-  "summary":"Коллега просит ответить на вопрос.",
-  "reason":"Есть конкретный запрос, требующий ответа.",
-  "include_in_report":true
+ "host": "imap.yandex.ru", "port": 993, "username": "example@yandex.ru", "auth_method": "oauth2",
+ "oauth_token": "TOKEN", "folder": "INBOX", "trash_folder": "Trash", "allow_delete": false,
+ "poll_interval_seconds": 300, "fetch_limit": 30, "max_message_bytes": 1048576
 }
 ```
+For app password use `"auth_method": "app_password"` and `"app_password": "..."`. GET never returns credentials. Empty credential in a POST preserves the existing credential when host, username, and authentication method match. Only `imap.yandex.ru` and `imap.yandex.com` are allowed as hosts. Changing the configured account or folder when emails already exist requires resetting the development database.
 
-- `POST /api/classifications/:id/retry` — **admin only**, explicitly schedules fresh LLM classification. Resets a human override; use only deliberately. LLM has no mailbox mutation capability.
+- `POST /api/mail/sync` — trigger scan.
+- `GET /api/mail/folders` — IMAP folder list.
+- `GET /api/mail/:id/content` — read body (BODY.PEEK).
+- `POST /api/mail/delete/preview` `{ "ids": [1,2] }` — preview.
+- `POST /api/mail/delete` `{ "ids": [1,2], "confirm": "MOVE_TO_TRASH", "password": "..." }` — **human-triggered** MOVE to trash. OAuth must have IMAP write permissions, and `allow_delete` must be true. The model cannot call this route. No permanent expunge endpoint exists.
+- `GET /api/mail/delete-audit` — history.
+- `POST /api/mail/delete/:id/reconcile` — manual reconciliation after ambiguous MOVE.
 
-Taxonomy:
+## Classification and reports
 
-| Field | Values |
-|---|---|
-| spam_verdict | `spam`, `not_spam`, `uncertain` |
-| category | `personal`, `work`, `finance`, `security`, `shopping`, `delivery`, `account`, `social`, `newsletter`, `promotion`, `notification`, `other`, `uncertain` |
-| importance | `low`, `medium`, `high`, `uncertain` |
-| action_type | `none`, `reply`, `review`, `payment`, `deadline`, `security`, `other` |
+- `GET /api/classifications`, `GET /api/classifications/:id`, `GET /api/classification/schema`.
+- `PATCH /api/classifications/:id` — manual classification override.
+- `POST /api/classifications/:id/retry` — manual retry.
+- `GET /api/queue/stats`, `GET /api/queue/problems`, `GET /api/reports/daily?date=YYYY-MM-DD`.
+- `GET /health` — public health check, `GET /api/health/db` — protected database check.
 
-`include_in_report` is computed by Go for LLM-generated classification; a human can override it. `needs_review` is true for uncertain/truncated content. No classification ever triggers an IMAP delete.
+No legacy `GET /api/reports/items`, `/api/users` endpoints, Bearer-auth fallback, or historical migration chain.
 
-## Reports and queue
+## React production SPA
 
-- `GET /api/queue/stats`
-- `GET /api/queue/problems?limit=50` — includes failed/skipped, uncertain, and unconfirmed mailbox moves.
-- `GET /api/reports/daily?date=YYYY-MM-DD` — UTC day, excludes messages moved to trash; maximum 1000 items.
-- `GET /api/reports/items` — legacy compact report items.
-- `POST /api/mail/sync` — admin, manual scan (classification remains asynchronous).
-
-## Human-only multi-delete (move to Trash)
-
-1. `GET /api/mail/folders` (**admin**) — inspect server folder names and `\\Trash` special-use attribute; configure `.env` accordingly.
-2. `POST /api/mail/delete/preview` (**admin**) — `{"ids":[12,13]}` → metadata for review/confirmation modal, no changes.
-3. `POST /api/mail/delete` (**admin**) — `{"ids":[12,13],"confirm":"MOVE_TO_TRASH","password":"<admin password>"}`. Maximum 100 IDs. Returns per-ID statuses and `207 Multi-Status` for partial failure.
-4. `GET /api/mail/delete-audit` (**admin**) — recent audit trail.
-5. `POST /api/mail/delete/:id/reconcile` (**admin**) — only after a human verifies the Yandex mailbox, `{ "resolution":"in_inbox"|"moved_to_trash", "password":"<admin password>" }`, for a message in `unknown` state. No IMAP mutation occurs in this endpoint.
-
-Deletion requires **re-entering the administrator password**; JWT alone is not sufficient. `MAIL_ALLOW_DELETE` defaults to false. Deletion becomes available only when an administrator deliberately enables it and supplies `MAIL_TRASH_FOLDER` (different from INBOX). On Yandex OAuth grant `mail:imap_full` (read and delete), **not** SMTP permissions. The server must advertise IMAP MOVE; automatic fallback to unscoped EXPUNGE is refused. No permanent expunge endpoint is provided. The requested email IDs refer to local SQLite IDs, *not* raw IMAP UIDs.
-
-On an ambiguous IMAP/network failure, the email is marked `unknown` and appears in `/api/queue/problems`; the backend deliberately refuses automatic retries of the move, because it may have already succeeded remotely. A human must reconcile the state with the mailbox. Emails marked deleted are retained in SQLite for audit (with `deleted_at`, `deleted_by`) and excluded from reports.
-
-## Operational caveats
-
-- No automatic OAuth refresh in this build.
-- IMAP library operations still may block on an unresponsive server after a connection (dial is time-bounded); do not expose APIs to untrusted networks.
-- These are *contract definitions*; integration-test against your Yandex account and llama.cpp before deploying.
-
-TypeScript consumers can copy the checked-in `contracts/mail-manager.d.ts` interfaces.
+If `FRONTEND_DIST` points to a built Vite `dist/` directory, Gin serves the
+React application on the same port as the API. `GET`/`HEAD` client routes
+fall back to `index.html`; API routes and missing static files do not.
+See README.md for build/deployment instructions.

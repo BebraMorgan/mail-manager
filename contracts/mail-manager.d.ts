@@ -10,7 +10,7 @@ export interface Classification {
   sender: string;
   subject: string;
   received_at: string;
-  is_spam: boolean; // legacy compatibility
+  is_spam: boolean; // derived from spam_verdict
   spam_verdict: SpamVerdict;
   importance: Importance;
   category: MailCategory;
@@ -43,4 +43,20 @@ export interface ManualClassification {
   summary:string;
   reason:string;
   include_in_report:boolean;
+}
+
+// Backend has exactly one administrator. No roles or user-management endpoints.
+export interface AdminUser { id: number; username: string; active: boolean; created_at: string }
+export interface AuthStatus { status: 'ok' }
+export interface MailSettings {
+ configured: boolean;
+ host?: string; port?: number; username?: string; auth_method?: 'oauth2'|'app_password';
+ folder?: string; trash_folder?: string; allow_delete?: boolean;
+ poll_interval_seconds?: number; fetch_limit?: number; max_message_bytes?: number;
+}
+export interface SetMailSettings {
+ host: 'imap.yandex.ru'|'imap.yandex.com';port: number;username:string;
+ auth_method:'oauth2'|'app_password';oauth_token?:string;app_password?:string;
+ folder:string;trash_folder:string;allow_delete:boolean;
+ poll_interval_seconds:number;fetch_limit:number;max_message_bytes:number;
 }

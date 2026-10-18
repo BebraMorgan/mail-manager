@@ -70,7 +70,7 @@ func TestBootstrapUserAndNoDuplicate(t *testing.T) {
 		t.Fatal("second bootstrap succeeded")
 	}
 	u, err := s.FindUser(ctx, "ADMIN")
-	if err != nil || u.Role != "admin" {
+	if err != nil || u.ID != 1 {
 		t.Fatalf("find admin: %v %v", u, err)
 	}
 	if err = s.ChangePassword(ctx, u.ID, "a long password 123", "another long password 456"); err != nil {

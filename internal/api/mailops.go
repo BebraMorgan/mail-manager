@@ -17,16 +17,14 @@ import (
 type MailOps struct {
 	db   *storage.Storage
 	imap *mail.Client
-	cfg  mail.PublicSettings
 }
 
-func NewMailOps(db *storage.Storage, imap *mail.Client, cfg mail.PublicSettings) *MailOps {
-	return &MailOps{db: db, imap: imap, cfg: cfg}
-}
+func NewMailOps(db *storage.Storage, imap *mail.Client) *MailOps { return &MailOps{db: db, imap: imap} }
 
 // Human-only: must be registered inside the authenticated admin group.
 func (h *MailOps) MoveToTrash(c *gin.Context) {
-	if !h.cfg.AllowDelete {
+	cfg := h.imap.PublicSettings()
+	if !cfg.AllowDelete {
 		c.JSON(http.StatusForbidden, gin.H{"error": "mail deletion disabled in configuration"})
 		return
 	}
@@ -65,7 +63,7 @@ func (h *MailOps) MoveToTrash(c *gin.Context) {
 		}
 		seen[id] = true
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 55*time.Second)
-		email, state, err := h.db.EmailForMailbox(ctx, id, h.cfg.Username, h.cfg.Folder)
+		email, state, err := h.db.EmailForMailbox(ctx, id, cfg.Username, cfg.Folder)
 		if errors.Is(err, storage.ErrMissingEmail) {
 			bad = true
 			out = append(out, gin.H{"id": id, "status": "not_found"})
@@ -89,7 +87,7 @@ func (h *MailOps) MoveToTrash(c *gin.Context) {
 			cancel()
 			continue
 		}
-		if err = h.db.BeginMove(ctx, id, actor.ID, h.cfg.Username, h.cfg.Folder); err != nil {
+		if err = h.db.BeginMove(ctx, id, actor.ID, cfg.Username, cfg.Folder); err != nil {
 			bad = true
 			out = append(out, gin.H{"id": id, "status": "conflict"})
 			cancel()
@@ -149,11 +147,12 @@ func (h *MailOps) MoveToTrash(c *gin.Context) {
 	c.JSON(status, gin.H{"items": out, "count": len(out)})
 }
 func (h *MailOps) Content(c *gin.Context) {
+	cfg := h.imap.PublicSettings()
 	id, ok := parseID(c)
 	if !ok {
 		return
 	}
-	email, state, err := h.db.EmailForMailbox(c.Request.Context(), id, h.cfg.Username, h.cfg.Folder)
+	email, state, err := h.db.EmailForMailbox(c.Request.Context(), id, cfg.Username, cfg.Folder)
 	if err != nil || state != "active" {
 		c.JSON(404, gin.H{"error": "mail not available"})
 		return
@@ -237,6 +236,7 @@ func (h *MailOps) Folders(c *gin.Context) {
 // Preview is read-only. React should display the subjects before asking for
 // a separate explicit confirmation of POST /api/mail/delete.
 func (h *MailOps) Preview(c *gin.Context) {
+	cfg := h.imap.PublicSettings()
 	var req struct {
 		IDs []int64 `json:"ids"`
 	}
@@ -255,7 +255,7 @@ func (h *MailOps) Preview(c *gin.Context) {
 			out = append(out, gin.H{"id": id, "status": "invalid_id"})
 			continue
 		}
-		e, state, err := h.db.EmailForMailbox(c.Request.Context(), id, h.cfg.Username, h.cfg.Folder)
+		e, state, err := h.db.EmailForMailbox(c.Request.Context(), id, cfg.Username, cfg.Folder)
 		if err != nil {
 			out = append(out, gin.H{"id": id, "status": "not_found"})
 			continue
@@ -263,10 +263,11 @@ func (h *MailOps) Preview(c *gin.Context) {
 		out = append(out, gin.H{"id": id, "sender": e.Sender, "subject": e.Subject, "status": state})
 	}
 	c.Header("Cache-Control", "no-store")
-	c.JSON(200, gin.H{"items": out, "enabled": h.cfg.AllowDelete, "action": "move_to_trash", "destination_configured": h.cfg.TrashFolder != ""})
+	c.JSON(200, gin.H{"items": out, "enabled": cfg.AllowDelete, "action": "move_to_trash", "destination_configured": cfg.TrashFolder != ""})
 }
 
 func (h *MailOps) Reconcile(c *gin.Context) {
+	cfg := h.imap.PublicSettings()
 	id, ok := parseID(c)
 	if !ok {
 		return
@@ -285,7 +286,7 @@ func (h *MailOps) Reconcile(c *gin.Context) {
 		return
 	}
 	// Restrict reconciliation to this configured mailbox.
-	if _, _, err := h.db.EmailForMailbox(c.Request.Context(), id, h.cfg.Username, h.cfg.Folder); err != nil {
+	if _, _, err := h.db.EmailForMailbox(c.Request.Context(), id, cfg.Username, cfg.Folder); err != nil {
 		c.JSON(404, gin.H{"error": "mail not found"})
 		return
 	}

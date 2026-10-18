@@ -29,7 +29,10 @@ const imapBatchSize = 20
 // connect opens an encrypted IMAP connection with a bounded session lifetime.
 // Cancellation closes the underlying socket and unblocks pending IMAP commands.
 func (m *Client) connect(ctx context.Context) (*imapclient.Client, error) {
-	cfg := m.config
+	cfg, configured := m.Settings()
+	if !configured {
+		return nil, storage.ErrMailNotConfigured
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
@@ -71,7 +74,10 @@ func (m *Client) Scan(
 	ctx context.Context,
 	db *storage.Storage,
 ) (int, error) {
-	cfg := m.config
+	cfg, configured := m.Settings()
+	if !configured {
+		return 0, storage.ErrMailNotConfigured
+	}
 
 	if err := ctx.Err(); err != nil {
 		return 0, err
@@ -270,6 +276,13 @@ func (m *Client) FetchOne(
 	ctx context.Context,
 	email storage.Email,
 ) (string, error) {
+	cfg, configured := m.Settings()
+	if !configured {
+		return "", storage.ErrMailNotConfigured
+	}
+	if email.Account != cfg.Username || email.Folder != cfg.Folder {
+		return "", ErrMessageGone
+	}
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -316,7 +329,7 @@ func (m *Client) FetchOne(
 	}
 
 	if int64(metadata[0].RFC822Size) >
-		int64(m.config.MaxMessageBytes) {
+		int64(m.maxMessageBytes()) {
 		return "", ErrMessageTooLarge
 	}
 
@@ -351,7 +364,7 @@ func (m *Client) FetchOne(
 		return "", ErrMessageGone
 	}
 
-	if len(raw) > m.config.MaxMessageBytes {
+	if len(raw) > m.maxMessageBytes() {
 		return "", ErrMessageTooLarge
 	}
 

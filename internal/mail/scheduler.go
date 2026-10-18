@@ -51,9 +51,22 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 	scanDone := make(chan struct{})
 	go func() {
 		defer close(scanDone)
-		scanTicker := time.NewTicker(interval)
+		scanTicker := time.NewTicker(5 * time.Second)
 		defer scanTicker.Stop()
+		lastAutoScan := time.Time{}
 		scan := func() {
+			mailCfg, configured := s.Client.Settings()
+			if !configured {
+				return
+			}
+			actual := mailCfg.PollInterval
+			if actual <= 0 {
+				actual = interval
+			}
+			if !lastAutoScan.IsZero() && time.Since(lastAutoScan) < actual {
+				return
+			}
+			lastAutoScan = time.Now()
 			start := time.Now()
 			n, err := s.Scan(ctx)
 			if err != nil {
@@ -86,6 +99,9 @@ func (s *Scheduler) Run(ctx context.Context, interval time.Duration) {
 			}
 			return
 		case <-workerTicker.C:
+			if _, configured := s.Client.Settings(); !configured {
+				continue
+			}
 			_, err := s.Worker.ProcessOne(ctx)
 			if err != nil && ctx.Err() == nil {
 				slog.Error("worker failed", "error", err)
